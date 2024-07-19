@@ -56,11 +56,11 @@ class FVbinder:
 
     @staticmethod
     def get_mask_from_sequence(chain: Chain) -> torch.Tensor:
-        mask = list()
-        for pos in chain.positions:
-            mask.append(torch.full((5,), fill_value=int(pos.is_in_cdr())))
-        mask = torch.stack(mask).float()
-        return mask
+        mask = torch.zeros(len(chain.seq))
+        for i, pos in enumerate(chain.positions):
+            mask[i] = pos.is_in_cdr()
+        # mask = torch.stack(mask).float()
+        return mask.bool()
 
     def to_pdb(self, filename: str):
         if self.coords is None:
@@ -171,7 +171,7 @@ class CustomIgFold:
             model_outs, scores = [], []
             for i, model in enumerate(self.models):
                 model_out = model(model_in)
-                model_out = model.gradient_refine(model_in, model_out)
+                # model_out = model.gradient_refine(model_in, model_out)
                 scores.append(model_out.prmsd.quantile(0.9))
                 model_outs.append(model_out)
 
