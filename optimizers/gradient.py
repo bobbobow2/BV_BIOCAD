@@ -19,6 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.notebook import tqdm
 
 from utils.general import *
+from losses import RMSD_loss_fn, inner_dist_matrices_mse
 
 # from utils.scorer import kabsch_mse, do_kabsch, kabsch
 
@@ -40,7 +41,7 @@ def RMSD_loss_fn(preds, target, mask):
     rmsd_sq = torch.sum(mse * mask, dim=-1) / mask.sum()
     return rmsd_sq
 
-
+  
 def v_gene_identity(sequence):
     c = Chain(sequence, scheme="imgt")
     v_germline_chains, _ = c.find_human_germlines(limit=1)
