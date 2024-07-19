@@ -13,15 +13,8 @@ def RMSD_loss_fn(preds, target, mask):
         preds,
         aligned_target,
         reduction="none",
-    ).sum(-1)
-    # mse = torch.sum(
-    #         mse * mask,
-    #         dim=-1,
-    #     ).sum() / mask.mean(-1).sum()
-    # return mse
-
-    rmsd_sq = torch.sum(mse * mask, dim=(-2, -1)) / mask.mean(-1).sum()
-
+    ).sum((-2, -1))
+    rmsd_sq = torch.sum(mse * mask, dim=-1) / mask.sum()
     return rmsd_sq
 
 
