@@ -19,33 +19,12 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.notebook import tqdm
 
 from utils.general import *
+from losses import RMSD_loss_fn, inner_dist_matrices_mse
 
 # from utils.scorer import kabsch_mse, do_kabsch, kabsch
 
 
 species_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.15)
-
-
-def RMSD_loss_fn(preds, target, mask):
-    aligned_target = do_kabsch(
-        mobile=target,
-        stationary=preds.detach(),
-        align_mask=None,
-    )
-    mse = F.mse_loss(
-        preds,
-        aligned_target,
-        reduction="none",
-    ).sum(-1)
-    # mse = torch.sum(
-    #         mse * mask,
-    #         dim=-1,
-    #     ).sum() / mask.mean(-1).sum()
-    # return mse
-
-    rmsd_sq = torch.sum(mse * mask, dim=(-2, -1)) / mask.mean(-1).sum()
-
-    return rmsd_sq
 
 
 def v_gene_identity(sequence):
