@@ -22,7 +22,7 @@ def inner_dist_matrices_mse(
         preds,
         target,
         mask,
-        atom_types_mask=torch.Tensor([0, 1, 0, 0, 1])):
+        atom_types_mask=torch.tensor([0, 1, 0, 0, 1], dtype=torch.bool)):
     preds = preds[0, mask, atom_types_mask, :].reshape((-1, 3))
     preds_dist_matrix = torch.sqrt(
         torch.sum((preds.unsqueeze(1) - preds) ** 2, dim=-1)
