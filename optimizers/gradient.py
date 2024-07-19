@@ -19,7 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.notebook import tqdm
 
 from utils.general import *
-from losses import RMSD_loss_fn, inner_dist_matrices_mse
+from .losses import RMSD_loss_fn, inner_dist_matrices_mse
 
 # from utils.scorer import kabsch_mse, do_kabsch, kabsch
 
@@ -208,11 +208,18 @@ class GradientOptimizer:
             self.optimizer.zero_grad()
             coords, species, log_likelyhood = self.generator.forward()
 
-            rmsd_loss = RMSD_loss_fn(
-                target=self.target.coords,
-                preds=coords,
-                mask=torch.concat((self.target.vh_cdr_mask, self.target.vl_cdr_mask)),
+            # rmsd_loss = RMSD_loss_fn(
+            #     target=self.target.coords,
+            #     preds=coords,
+            #     mask=torch.concat((self.target.vh_cdr_mask, self.target.vl_cdr_mask)),
+            # )
+
+            rmsd_loss = inner_dist_matrices_mse(
+                coords,
+                self.target.coords,
+                torch.concat((self.target.vh_cdr_mask, self.target.vl_cdr_mask))
             )
+
             species_loss = species_loss_fn(
                 species,
                 torch.full(
