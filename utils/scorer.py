@@ -83,7 +83,7 @@ def loss(binder1, binder2):
     try:
         # return (0.2*v_gene(binder1.vl)+ 0.3*v_gene(binder1.vh) + 0.5*(1/(1+(RMSD_LOSS(binder1, binder2)/0.1)**2)))
         vl, vh, rmsd_l = get_losses(binder1, binder2)
-        return 0.2 * vl + 0.3 * vh + 0.5 * rmsd_l
+        return 0.4 * vl + 0.4 * vh + 0.2 * rmsd_l
     except Exception as e:
         print(e)
         return -1
