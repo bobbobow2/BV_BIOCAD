@@ -27,6 +27,21 @@ from losses import RMSD_loss_fn, inner_dist_matrices_mse
 species_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.15)
 
 
+def RMSD_loss_fn(preds, target, mask):
+    aligned_target = do_kabsch(
+        mobile=target,
+        stationary=preds.detach(),
+        align_mask=None,
+    )
+    mse = F.mse_loss(
+        preds,
+        aligned_target,
+        reduction="none",
+    ).sum((-2, -1))
+    rmsd_sq = torch.sum(mse * mask, dim=-1) / mask.sum()
+    return rmsd_sq
+
+  
 def v_gene_identity(sequence):
     c = Chain(sequence, scheme="imgt")
     v_germline_chains, _ = c.find_human_germlines(limit=1)
@@ -67,25 +82,35 @@ class GenAB(nn.Module):
         )
 
         # Preprocess logits
-        vh_cdr_mask = F.pad(
-            b.vh_cdr_mask.max(dim=1).values,
-            pad=(1, self.logits.size(dim=1) - b.vh_cdr_mask.size(dim=0) - 1),
-            mode="constant",
-            value=0,
-        )
-        self.logits[0][vh_cdr_mask == 1] = self.logits[0][vh_cdr_mask == 1].where(
-            self.logits[0][vh_cdr_mask == 1] != 0,
+        vh_pad_length = (1, self.logits.size(dim=1) - b.vh_cdr_mask.size(dim=0) - 1)
+        vh_cdr_mask = F.pad(b.vh_cdr_mask, pad=vh_pad_length, value=0)
+
+        # self.logits[0, vh_cdr_mask][self.logits[0, vh_cdr_mask]!=0] = -np.inf
+        # self.logits[0, vh_cdr_mask, self.tokenizer_out.input_ids]
+
+        vl_pad_length = (1, self.logits.size(dim=1) - b.vl_cdr_mask.size(dim=0) - 1)
+        vl_cdr_mask = F.pad(b.vl_cdr_mask, pad=vl_pad_length, value=0)
+        # self.logits[1, vh_cdr_mask, :] = -np.inf
+
+        # vh_cdr_mask = F.pad(
+        #     b.vh_cdr_mask.max(dim=1).values,
+        #     pad=(1, self.logits.size(dim=1) - b.vh_cdr_mask.size(dim=0) - 1),
+        #     mode="constant",
+        #     value=0,
+        # )
+        self.logits[0][vh_cdr_mask] = self.logits[0][vh_cdr_mask].where(
+            self.logits[0][vh_cdr_mask] != 0,
             torch.tensor([-np.inf], device=device),
         )
 
-        vl_cdr_mask = F.pad(
-            b.vl_cdr_mask.max(dim=1).values,
-            pad=(1, self.logits.size(dim=1) - b.vl_cdr_mask.size(dim=0) - 1),
-            mode="constant",
-            value=0,
-        )
-        self.logits[1][vl_cdr_mask == 1] = self.logits[1][vl_cdr_mask == 1].where(
-            self.logits[1][vl_cdr_mask == 1] != 0,
+        # vl_cdr_mask = F.pad(
+        #     b.vl_cdr_mask.max(dim=1).values,
+        #     pad=(1, self.logits.size(dim=1) - b.vl_cdr_mask.size(dim=0) - 1),
+        #     mode="constant",
+        #     value=0,
+        # )
+        self.logits[1][vl_cdr_mask] = self.logits[1][vl_cdr_mask].where(
+            self.logits[1][vl_cdr_mask] != 0,
             torch.tensor([-np.inf], device=device),
         )
 
@@ -121,12 +146,11 @@ class GenAB(nn.Module):
         )
 
         # Pseudo Log-Likelyhood
-        m_logits = self.logits
-
-        pred_logits = outputs.prediction_logits
 
         log_likelyhood = -F.cross_entropy(
-            pred_logits, F.softmax(m_logits, dim=-1), reduction="mean"
+            outputs.prediction_logits.transpose(1, 2),
+            F.softmax(self.logits.detach(), dim=-1).transpose(1, 2),
+            reduction="mean",
         )
 
         # Coords Preds
@@ -181,6 +205,7 @@ class GradientOptimizer:
         target_class=1,
         lr=0.05,
         sub_infinity=10,
+        validation=False,
         verbose=False,
         tensorboard=False,
     ):
@@ -192,6 +217,7 @@ class GradientOptimizer:
 
         self.verbose = verbose
         self.tensorboard = tensorboard
+        self.validation = validation
 
         self.generator = GenAB(b=self.start, sub_infinity=sub_infinity)
         self.optimizer = torch.optim.Adam([self.generator.logits], lr=lr)
@@ -202,6 +228,8 @@ class GradientOptimizer:
         self.loss_idx_value = 0
         self.best_valid_binder = None
         self.best_valid_binder_score = 1e12
+
+        self.log_likelyhood = None
 
     def step(self, steps=1):
         for i in (pbar := tqdm(range(steps))):
@@ -221,8 +249,10 @@ class GradientOptimizer:
             )
             log_likelyhood_loss = -log_likelyhood
 
-            # loss = rmsd_loss
-            loss = 10 * rmsd_loss + 0.1 * species_loss + 0.3 * log_likelyhood_loss
+            # loss = log_likelyhood_loss
+            if self.log_likelyhood is None:
+                self.log_likelyhood = log_likelyhood_loss.detach()
+            loss = 10 * rmsd_loss + 0.2 * species_loss + 10 * abs(self.log_likelyhood - log_likelyhood_loss)
 
             # writer.add_scalars("Loss", {
             #     "RMSD Loss": rmsd_loss,
@@ -242,17 +272,18 @@ class GradientOptimizer:
                 if loss < self.best_valid_binder_score:
                     self.best_valid_binder = a
 
-                if self.tensorboard:
+                if self.tensorboard and self.validation:
                     self.writer.add_scalar(
-                        "Valid/VH_v-gen", v_gene_identity(gen_vh), self.loss_idx_value
+                        "Validation/VH_v-gen", v_gene_identity(gen_vh), self.loss_idx_value
                     )
                     self.writer.add_scalar(
-                        "Valid/VL_v-gen", v_gene_identity(gen_vl), self.loss_idx_value
+                        "Validation/VL_v-gen", v_gene_identity(gen_vl), self.loss_idx_value
                     )
             except Exception as e:
                 valid = False
 
             pbar.set_description(f"Valid: {valid}, Loss {loss}")
+            self.writer.add_text("Valid", str(valid))
 
             if self.verbose:
                 print(f"RMSD Loss: {rmsd_loss}")
