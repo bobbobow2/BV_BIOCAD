@@ -2,6 +2,7 @@ from glob import glob
 
 import antiberty
 import igfold
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.notebook import tqdm
 
 from utils.general import *
-from .losses import RMSD_loss_fn, inner_dist_matrices_mse
+from .losses import RMSD_loss_fn, inner_dist_matrices_mse, smooth_v_gene
 
 # from utils.scorer import kabsch_mse, do_kabsch, kabsch
 
@@ -57,9 +58,9 @@ device = torch.device("cuda")
 
 
 class GenAB(nn.Module):
-    def __init__(self, b: FVbinder, sub_infinity=10):
+    def __init__(self, binder: FVbinder, sub_infinity=10):
         super().__init__()
-        seqs = [b.vh.seq, b.vl.seq]
+        seqs = [binder.vh.seq, binder.vl.seq]
         seqs = [" ".join(list(j)) for j in seqs]
 
         self.antiberty = AntiBERTy.from_pretrained(ANTIBERTY_CHECKPOINT_PATH).to(device)
@@ -81,15 +82,33 @@ class GenAB(nn.Module):
             * sub_infinity
         )
 
+        vh_imgt = Chain(binder.vh.seq, 'imgt')
+        vh_germline = vh_imgt.find_human_germlines(limit=1)[0][0]
+        vh_germline_aligned = np.array([vh_germline.positions.get(pos, 'X') for pos, _ in vh_imgt])
+        vh_germline_aligned[binder.vh_cdr_mask.cpu()] = 'X'
+
+        vl_imgt = Chain(binder.vl.seq, 'imgt')
+        vl_germline = vl_imgt.find_human_germlines(limit=1)[0][0]
+        vl_germline_aligned = np.array([vl_germline.positions.get(pos, 'X') for pos, _ in vl_imgt])
+        vl_germline_aligned[binder.vl_cdr_mask.cpu()] = 'X'
+
+        germlines = (vh_germline_aligned, vl_germline_aligned)
+        germlines = [" ".join(gl) for gl in germlines]
+        self.tokenized_germlines = self.antiberty_tokenizer(
+            germlines,
+            return_tensors="pt",
+            padding=True,
+        ).to(device)
+
         # Preprocess logits
-        vh_pad_length = (1, self.logits.size(dim=1) - b.vh_cdr_mask.size(dim=0) - 1)
-        vh_cdr_mask = F.pad(b.vh_cdr_mask, pad=vh_pad_length, value=0)
+        vh_pad_length = (1, self.logits.size(dim=1) - binder.vh_cdr_mask.size(dim=0) - 1)
+        vh_cdr_mask = F.pad(binder.vh_cdr_mask, pad=vh_pad_length, value=0)
 
         # self.logits[0, vh_cdr_mask][self.logits[0, vh_cdr_mask]!=0] = -np.inf
         # self.logits[0, vh_cdr_mask, self.tokenizer_out.input_ids]
 
-        vl_pad_length = (1, self.logits.size(dim=1) - b.vl_cdr_mask.size(dim=0) - 1)
-        vl_cdr_mask = F.pad(b.vl_cdr_mask, pad=vl_pad_length, value=0)
+        vl_pad_length = (1, self.logits.size(dim=1) - binder.vl_cdr_mask.size(dim=0) - 1)
+        vl_cdr_mask = F.pad(binder.vl_cdr_mask, pad=vl_pad_length, value=0)
         # self.logits[1, vh_cdr_mask, :] = -np.inf
 
         # vh_cdr_mask = F.pad(
@@ -219,7 +238,7 @@ class GradientOptimizer:
         self.tensorboard = tensorboard
         self.validation = validation
 
-        self.generator = GenAB(b=self.start, sub_infinity=sub_infinity)
+        self.generator = GenAB(self.start, sub_infinity=sub_infinity)
         self.optimizer = torch.optim.Adam([self.generator.logits], lr=lr)
 
         if self.tensorboard:
@@ -236,13 +255,13 @@ class GradientOptimizer:
             self.optimizer.zero_grad()
             coords, species, log_likelyhood = self.generator.forward()
 
-            # rmsd_loss = RMSD_loss_fn(
-            #     target=self.target.coords,
-            #     preds=coords,
-            #     mask=torch.concat((self.target.vh_cdr_mask, self.target.vl_cdr_mask)),
-            # )
+            rmsd_loss = RMSD_loss_fn(
+                target=self.target.coords,
+                preds=coords,
+                mask=torch.concat((self.target.vh_cdr_mask, self.target.vl_cdr_mask)),
+            )
 
-            rmsd_loss = inner_dist_matrices_mse(
+            inner_dist_loss = inner_dist_matrices_mse(
                 coords,
                 self.target.coords,
                 torch.concat((self.target.vh_cdr_mask, self.target.vl_cdr_mask))
@@ -254,12 +273,21 @@ class GradientOptimizer:
                     size=(species.size(dim=0),), fill_value=self.target_class
                 ).to(device),
             )
+
+            v_gene_loss = smooth_v_gene(
+                self.generator.logits,
+                self.generator.tokenized_germlines
+            )
+
             log_likelyhood_loss = -log_likelyhood
 
             # loss = log_likelyhood_loss
             if self.log_likelyhood is None:
                 self.log_likelyhood = log_likelyhood_loss.detach()
-            loss = 10 * rmsd_loss + 0.2 * species_loss + 10 * abs(self.log_likelyhood - log_likelyhood_loss)
+            
+            # loss = rmsd_loss + v_gene_loss
+            loss = inner_dist_loss + 0.01 * v_gene_loss
+            # loss = rmsd_loss + 2 * species_loss + 100 * abs(self.log_likelyhood - log_likelyhood_loss)
 
             # writer.add_scalars("Loss", {
             #     "RMSD Loss": rmsd_loss,
@@ -303,7 +331,13 @@ class GradientOptimizer:
             if self.tensorboard:
                 self.writer.add_scalar("Loss/RMSD Loss", rmsd_loss, self.loss_idx_value)
                 self.writer.add_scalar(
+                    "Loss/Inner-dist Loss", inner_dist_loss, self.loss_idx_value
+                )
+                self.writer.add_scalar(
                     "Loss/Species Loss", species_loss, self.loss_idx_value
+                )
+                self.writer.add_scalar(
+                    "Loss/Smooth v-gene Loss", v_gene_loss, self.loss_idx_value
                 )
                 self.writer.add_scalar(
                     "Loss/Log-Likelyhood Loss", log_likelyhood_loss, self.loss_idx_value
