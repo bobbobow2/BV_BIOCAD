@@ -38,8 +38,8 @@ def freeze(model):
 class FVbinder:
     def __init__(
         self,
-        vh: Chain,
-        vl: Chain,
+        vh: str,
+        vl: str,
         coords: torch.Tensor = None,
         vh_cdr_mask: torch.Tensor = None,
         vl_cdr_mask: torch.Tensor = None,
